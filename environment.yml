@@ -1,0 +1,12 @@
+name: spc_quality
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - matplotlib
+  - scipy
+  - pip
+  - pip:
+      - scikit-learn
