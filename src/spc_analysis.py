@@ -52,6 +52,248 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # =========================
+# Generalized SPC feature extraction
+# =========================
+
+def compute_spc_features(x, window=10):
+    """
+    Compute SPC-based instability features for a single CTQ signal.
+
+    Parameters
+    ----------
+    x : array-like
+        Sequential CTQ measurements
+    window : int
+        Rolling window size for local instability
+
+    Returns
+    -------
+    DataFrame with SPC features
+    """
+
+    x = np.asarray(x)
+
+    # Moving Range
+    mr = np.empty_like(x, dtype=float)
+    mr[:] = np.nan
+    mr[1:] = np.abs(np.diff(x))
+
+    # Estimate sigma from MR
+    MR_bar = np.nanmean(mr)
+    d2 = 1.128  # for n=2
+    sigma_hat = MR_bar / d2
+
+    x_bar = np.nanmean(x)
+    UCL = x_bar + 3 * sigma_hat
+    LCL = x_bar - 3 * sigma_hat
+
+    df_spc = pd.DataFrame({
+        "spc_violation": ((x > UCL) | (x < LCL)).astype(int),
+        "moving_range": mr,
+        "dist_to_UCL": UCL - x,
+        "dist_to_LCL": x - LCL,
+        "mr_roll_mean": pd.Series(mr).rolling(window).mean(),
+        "mr_roll_std": pd.Series(mr).rolling(window).std(),
+    })
+
+    return df_spc
+
+# =========================
+# Multi-CTQ selection
+# =========================
+
+CTQ_COLS = [
+    "Pixels_Areas",
+    "Sum_of_Luminosity",
+    "Orientation_Index",
+    "Luminosity_Index",
+]
+
+print("\nSelected CTQs:")
+for c in CTQ_COLS:
+    print(f"{c}: {'OK' if c in df.columns else 'MISSING'}")
+
+# =========================
+# Compute SPC features for all CTQs
+# =========================
+
+spc_feature_blocks = []
+
+for ctq in CTQ_COLS:
+    features = compute_spc_features(df[ctq].values)
+    features.columns = [f"{ctq}__{c}" for c in features.columns]
+    spc_feature_blocks.append(features)
+
+spc_features_all = pd.concat(spc_feature_blocks, axis=1)
+
+print("\nSPC feature matrix shape:", spc_features_all.shape)
+print("Example SPC feature columns:")
+print(spc_features_all.columns[:10].tolist())
+
+# =========================
+# Merge SPC features into main dataframe
+# =========================
+
+df = pd.concat([df, spc_features_all], axis=1)
+
+print("\nSample SPC features for Pixels_Areas:")
+cols_preview = [c for c in df.columns if c.startswith("Pixels_Areas__")]
+print(df[cols_preview].head(12).to_string(index=False))
+
+# =========================
+# Normalize SPC instability features
+# =========================
+
+from sklearn.preprocessing import StandardScaler
+
+instability_cols = []
+
+for ctq in CTQ_COLS:
+    instability_cols.extend([
+        f"{ctq}__spc_violation",
+        f"{ctq}__moving_range",
+        f"{ctq}__mr_roll_std",
+    ])
+
+instability_df = df[instability_cols].copy()
+
+# Drop rows with NaNs for fair fusion
+instability_df_clean = instability_df.dropna()
+
+scaler = StandardScaler()
+instability_scaled = scaler.fit_transform(instability_df_clean)
+
+instability_scaled_df = pd.DataFrame(
+    instability_scaled,
+    columns=instability_df_clean.columns,
+    index=instability_df_clean.index
+)
+
+# =========================
+# Process Instability Index (PII)
+# =========================
+
+df.loc[instability_scaled_df.index, "PII"] = (
+    instability_scaled_df.abs().mean(axis=1)
+)
+
+print("\nPII preview:")
+print(df["PII"].dropna().head(10).to_string(index=False))
+
+print("\nPII summary statistics:")
+print(df["PII"].describe())
+
+# =========================
+# PII vs defects (Bumps)
+# =========================
+
+valid = df[["PII", "Bumps"]].dropna()
+print("\nMean PII when Bumps=1:", valid.loc[valid["Bumps"] == 1, "PII"].mean())
+print("Mean PII when Bumps=0:", valid.loc[valid["Bumps"] == 0, "PII"].mean())
+
+print("\nCorrelation with Bumps:")
+print("PII:",
+      valid["PII"].corr(valid["Bumps"]))
+
+pa_mr = df.loc[valid.index, "Pixels_Areas__mr_roll_std"]
+print("Pixels_Areas MR std:",
+      pa_mr.corr(valid["Bumps"]))
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+
+X_pii = valid[["PII"]]
+y_pii = valid["Bumps"]
+
+Xp_tr, Xp_te, yp_tr, yp_te = train_test_split(
+    X_pii, y_pii, test_size=0.3, random_state=42, stratify=y_pii
+)
+
+pii_model = LogisticRegression(class_weight="balanced", max_iter=1000)
+pii_model.fit(Xp_tr, yp_tr)
+
+yp_pred = pii_model.predict(Xp_te)
+print("\nPII-only model:")
+print(classification_report(yp_te, yp_pred))
+
+# =========================
+# Compact feature set: PII + raw CTQs
+# =========================
+
+compact_features = [
+    "PII",
+    "Pixels_Areas",
+    "Sum_of_Luminosity",
+    "Orientation_Index",
+    "Luminosity_Index",
+]
+
+df_compact = df[compact_features + ["Bumps"]].dropna()
+
+Xc = df_compact[compact_features]
+yc = df_compact["Bumps"]
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix
+
+Xc_tr, Xc_te, yc_tr, yc_te = train_test_split(
+    Xc, yc, test_size=0.3, random_state=42, stratify=yc
+)
+
+compact_model = LogisticRegression(
+    max_iter=1000, class_weight="balanced"
+)
+compact_model.fit(Xc_tr, yc_tr)
+
+yc_pred = compact_model.predict(Xc_te)
+
+print("\n=== COMPACT MODEL (PII + raw CTQs) ===")
+print(classification_report(yc_te, yc_pred))
+print("Confusion matrix:")
+print(confusion_matrix(yc_te, yc_pred))
+
+coef_compact = (
+    pd.DataFrame({
+        "feature": Xc.columns,
+        "coef": compact_model.coef_[0]
+    })
+    .sort_values("coef", ascending=False)
+)
+
+print("\nCompact model coefficients:")
+print(coef_compact.to_string(index=False))
+
+# =========================
+# Lead-time targets
+# =========================
+
+for k in [3, 5]:
+    df[f"Bumps_lead_{k}"] = df["Bumps"].shift(-k)
+
+from sklearn.metrics import classification_report
+
+def eval_lead(k):
+    lead_df = df[["PII", f"Bumps_lead_{k}"]].dropna()
+    X = lead_df[["PII"]]
+    y = lead_df[f"Bumps_lead_{k}"]
+
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=y
+    )
+
+    m = LogisticRegression(class_weight="balanced", max_iter=1000)
+    m.fit(X_tr, y_tr)
+    y_pred = m.predict(X_te)
+
+    print(f"\n=== Lead-time k={k} (PII-only) ===")
+    print(classification_report(y_te, y_pred))
+
+for k in [3, 5]:
+    eval_lead(k)
+
+# =========================
 # SPC: I–MR for Pixels_Areas
 # =========================
 
