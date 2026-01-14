@@ -99,6 +99,24 @@ Both models used the same:
   * Improved overall decision quality
   * Provided clearer physical interpretation
 
+## PII Decomposition and Root-Cause Insight
+
+To make the fused Process Instability Index (PII) actionable, the index was decomposed into **per-CTQ contributions**.  
+Because PII is defined as the mean absolute normalized instability across CTQs, each contribution can be interpreted directly as *how much a specific signal drives overall process instability at a given time*.
+
+Analysis of the highest-instability events shows that:
+- Major PII spikes are **multi-signal events**, not isolated sensor noise
+- **Pixels_Areas** and **Sum_of_Luminosity** consistently dominate severe instability
+- Geometry-related indices contribute secondarily, acting as modifiers rather than root causes
+
+This decomposition enables engineers to move from *“the process is unstable”* to *“which signals should be checked first”*, supporting efficient root-cause investigation and corrective action.
+
+The figures below illustrate:
+- The evolution of PII around a major instability event
+- A stacked breakdown of CTQ contributions over the same window
+
+(See `figures/PII_peak_window.png` and `figures/PII_decomposition_stack.png`.)
+
 **Key insight:**
 
 > Defects correlate more strongly with **process instability** than with absolute measurement values alone.
